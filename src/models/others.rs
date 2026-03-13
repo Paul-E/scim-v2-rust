@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -97,29 +95,133 @@ impl Default for ListResponse {
 pub struct PatchOp {
     pub schemas: Vec<String>,
     #[serde(rename = "Operations")]
-    pub operations: Vec<PatchOperations>,
-}
-
-impl Default for PatchOp {
-    fn default() -> Self {
-        PatchOp {
-            schemas: vec!["urn:ietf:params:scim:api:messages:2.0:PatchOp".to_string()],
-            operations: vec![PatchOperations::default()],
-        }
-    }
+    pub operations: Vec<PatchOperation>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct PatchOperations {
-    pub op: String,
-    pub value: HashMap<String, Value>,
+#[serde(untagged)]
+pub enum OperationTarget {
+    WithPath {
+        path: String,
+        value: Value,
+    },
+    WithoutPath {
+        value: serde_json::Map<String, Value>,
+    },
 }
 
-impl Default for PatchOperations {
-    fn default() -> Self {
-        PatchOperations {
-            op: "".to_string(),
-            value: HashMap::new(),
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "op")]
+pub enum PatchOperation {
+    #[serde(rename = "add")]
+    Add(OperationTarget),
+    #[serde(rename = "remove")]
+    Remove { path: String },
+    #[serde(rename = "replace")]
+    Replace(OperationTarget),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    const PATCH_OP_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
+
+    #[test]
+    fn test_deserialize_patch_op() {
+        // operations_01.json: add members with one member value
+        let ops: PatchOp = serde_json::from_str(include_str!("../test_data/operations_01.json"))
+            .expect("Failed to deserialize patch operations");
+        assert_eq!(ops.schemas, vec![PATCH_OP_SCHEMA]);
+        assert_eq!(ops.operations.len(), 1);
+        assert!(
+            matches!(&ops.operations[0], PatchOperation::Add(OperationTarget::WithPath { path, .. }) if path == "members")
+        );
+
+        // operations_02.json: add without path (whole-resource target)
+        let ops: PatchOp = serde_json::from_str(include_str!("../test_data/operations_02.json"))
+            .expect("Failed to deserialize patch operations");
+        assert_eq!(ops.schemas, vec![PATCH_OP_SCHEMA]);
+        assert_eq!(ops.operations.len(), 1);
+        assert!(matches!(
+            &ops.operations[0],
+            PatchOperation::Add(OperationTarget::WithoutPath { .. })
+        ));
+
+        // operations_03.json: remove member by filter path
+        let ops: PatchOp = serde_json::from_str(include_str!("../test_data/operations_03.json"))
+            .expect("Failed to deserialize patch operations");
+        assert_eq!(ops.schemas, vec![PATCH_OP_SCHEMA]);
+        assert_eq!(ops.operations.len(), 1);
+        assert!(matches!(&ops.operations[0], PatchOperation::Remove { path }
+                if path == "members[value eq \"2819c223-7f76-...413861904646\"]"));
+
+        // operations_04.json: remove all members
+        let ops: PatchOp = serde_json::from_str(include_str!("../test_data/operations_04.json"))
+            .expect("Failed to deserialize patch operations");
+        assert_eq!(ops.schemas, vec![PATCH_OP_SCHEMA]);
+        assert_eq!(ops.operations.len(), 1);
+        assert!(matches!(&ops.operations[0], PatchOperation::Remove { path } if path == "members"));
+
+        // operations_05.json: remove emails matching compound filter
+        let ops: PatchOp = serde_json::from_str(include_str!("../test_data/operations_05.json"))
+            .expect("Failed to deserialize patch operations");
+        assert_eq!(ops.schemas, vec![PATCH_OP_SCHEMA]);
+        assert_eq!(ops.operations.len(), 1);
+        assert!(matches!(&ops.operations[0], PatchOperation::Remove { path }
+                if path == "emails[type eq \"work\" and value ew \"example.com\"]"));
+
+        // operations_06.json: remove all members then add two new members
+        let ops: PatchOp = serde_json::from_str(include_str!("../test_data/operations_06.json"))
+            .expect("Failed to deserialize patch operations");
+        assert_eq!(ops.schemas, vec![PATCH_OP_SCHEMA]);
+        assert_eq!(ops.operations.len(), 2);
+        assert!(matches!(&ops.operations[0], PatchOperation::Remove { path } if path == "members"));
+        assert!(
+            matches!(&ops.operations[1], PatchOperation::Add(OperationTarget::WithPath { path, .. }) if path == "members")
+        );
+
+        // operations_07.json: replace members list
+        let ops: PatchOp = serde_json::from_str(include_str!("../test_data/operations_07.json"))
+            .expect("Failed to deserialize patch operations");
+        assert_eq!(ops.schemas, vec![PATCH_OP_SCHEMA]);
+        assert_eq!(ops.operations.len(), 1);
+        assert!(
+            matches!(&ops.operations[0], PatchOperation::Replace(OperationTarget::WithPath { path, .. }) if path == "members")
+        );
+
+        // operations_08.json: replace work address with an object value
+        let ops: PatchOp = serde_json::from_str(include_str!("../test_data/operations_08.json"))
+            .expect("Failed to deserialize patch operations");
+        assert_eq!(ops.schemas, vec![PATCH_OP_SCHEMA]);
+        assert_eq!(ops.operations.len(), 1);
+        assert!(
+            matches!(&ops.operations[0], PatchOperation::Replace(OperationTarget::WithPath { path, .. })
+                if path == "addresses[type eq \"work\"]")
+        );
+
+        // operations_09.json: replace specific field via nested filter path
+        let ops: PatchOp = serde_json::from_str(include_str!("../test_data/operations_09.json"))
+            .expect("Failed to deserialize patch operations");
+        assert_eq!(ops.schemas, vec![PATCH_OP_SCHEMA]);
+        assert_eq!(ops.operations.len(), 1);
+        match &ops.operations[0] {
+            PatchOperation::Replace(OperationTarget::WithPath { path, value }) => {
+                assert_eq!(path, "addresses[type eq \"work\"].streetAddress");
+                assert_eq!(value.as_str(), Some("1010 Broadway Ave"));
+            }
+            _ => panic!("Expected Replace WithPath operation"),
         }
+
+        // operations_10.json: replace without path (whole-resource target)
+        let ops: PatchOp = serde_json::from_str(include_str!("../test_data/operations_10.json"))
+            .expect("Failed to deserialize patch operations");
+        assert_eq!(ops.schemas, vec![PATCH_OP_SCHEMA]);
+        assert_eq!(ops.operations.len(), 1);
+        assert!(matches!(
+            &ops.operations[0],
+            PatchOperation::Replace(OperationTarget::WithoutPath { .. })
+        ));
     }
 }
