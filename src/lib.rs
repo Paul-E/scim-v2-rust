@@ -94,6 +94,11 @@ pub mod models {
     pub mod user;
 }
 
+#[rustfmt::skip]
+#[allow(clippy::all)]
+pub(crate) mod filter_parser;
+pub mod filter;
+
 /// Declaring the utils module which contains the error submodule
 pub mod utils {
     pub mod error;
