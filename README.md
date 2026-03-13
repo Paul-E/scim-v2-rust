@@ -93,6 +93,21 @@ Err(e) => println !("Deserialization error: {}", e),
 
 For more examples and usage details, refer to the documentation of each function and struct.
 
+## Regenerating the filter parser
+
+The SCIM filter parser (`src/filter_parser.rs`) is pre-generated from `src/filter_parser.lalrpop`
+using [LALRPOP](https://github.com/lalrpop/lalrpop). The generated file is committed
+to the repository so no build script is required.
+
+If you modify `src/filter_parser.lalrpop`, regenerate `src/filter_parser.rs` by running:
+
+```sh
+cargo install lalrpop
+lalrpop src/filter_parser.lalrpop
+```
+
+Commit both `src/filter_parser.lalrpop` and the updated `src/filter_parser.rs` together.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
