@@ -115,11 +115,11 @@ pub enum OperationTarget {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "op")]
 pub enum PatchOperation {
-    #[serde(rename = "add")]
+    #[serde(rename = "add", alias = "Add", alias = "ADD")]
     Add(OperationTarget),
-    #[serde(rename = "remove")]
+    #[serde(rename = "remove", alias = "Remove", alias = "REMOVE")]
     Remove { path: PatchPath },
-    #[serde(rename = "replace")]
+    #[serde(rename = "replace", alias = "Replace", alias = "REPLACE")]
     Replace(OperationTarget),
 }
 

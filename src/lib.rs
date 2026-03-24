@@ -102,4 +102,5 @@ pub mod filter;
 /// Declaring the utils module which contains the error submodule
 pub mod utils {
     pub mod error;
+    pub(crate) mod serde;
 }

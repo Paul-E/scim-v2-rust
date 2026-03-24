@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::enterprise_user::EnterpriseUser;
 use crate::models::scim_schema::Meta;
-use crate::utils::error::SCIMError;
+use crate::utils::{error::SCIMError, serde::deserialize_optional_lenient_bool};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -213,7 +213,10 @@ pub struct Role {
     pub display: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_lenient_bool"
+    )]
     pub primary: Option<bool>,
 }
 
@@ -781,5 +784,13 @@ mod tests {
         assert!(user.is_ok());
         let user = user.unwrap();
         assert!(user.enterprise_user.is_none());
+    }
+
+    // Test data is from https://scimvalidator.microsoft.com/
+    #[test]
+    fn deserialize_entra_user() {
+        let user: Result<User, serde_json::Error> =
+            serde_json::from_str(include_str!("../test_data/entra_user_creation_test.json"));
+        user.expect("user should deserialize");
     }
 }
