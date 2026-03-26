@@ -63,34 +63,22 @@ impl Default for ListQuery {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
-pub enum Resource {
-    User(Box<User>),
+pub enum Resource<T> {
+    User(Box<User<T>>),
     Schema(Box<Schema>),
-    Group(Box<Group>),
+    Group(Box<Group<T>>),
     ResourceType(Box<ResourceType>),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
-pub struct ListResponse {
+pub struct ListResponse<T> {
     pub items_per_page: i64,
     pub total_results: i64,
     pub start_index: i64,
     pub schemas: Vec<String>,
     #[serde(rename = "Resources")]
-    pub resources: Vec<Resource>,
-}
-
-impl Default for ListResponse {
-    fn default() -> Self {
-        ListResponse {
-            items_per_page: 0,
-            total_results: 0,
-            start_index: 1,
-            schemas: vec!["urn:ietf:params:scim:api:messages:2.0:ListResponse".to_string()],
-            resources: vec![],
-        }
-    }
+    pub resources: Vec<Resource<T>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
