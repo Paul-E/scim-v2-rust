@@ -466,11 +466,11 @@ pub(crate) fn parse_attr_path(s: &str) -> Result<AttrPath, FilterActionError> {
 /// // emails[type eq "work"].value
 /// let path = PatchPath::Value(PatchValuePath {
 ///     attr: AttrPath::with_name("emails"),
-///     filter: Box::new(ValFilter::Attr(AttrExp::Comparison(
+///     filter: ValFilter::Attr(AttrExp::Comparison(
 ///         AttrPath::with_name("type"),
 ///         CompareOp::Eq,
 ///         "work".into(),
-///     ))),
+///     )),
 ///     sub_attr: Some("value".into()),
 /// });
 /// assert_eq!(path.to_string(), r#"emails[type eq "work"].value"#);
@@ -493,11 +493,11 @@ pub enum PatchPath {
 /// # use scim_v2::filter::*;
 /// let pvp = PatchValuePath {
 ///     attr: AttrPath::with_name("emails"),
-///     filter: Box::new(ValFilter::Attr(AttrExp::Comparison(
+///     filter: ValFilter::Attr(AttrExp::Comparison(
 ///         AttrPath::with_name("type"),
 ///         CompareOp::Eq,
 ///         "work".into(),
-///     ))),
+///     )),
 ///     sub_attr: Some("value".into()),
 /// };
 /// assert_eq!(pvp.to_string(), r#"emails[type eq "work"].value"#);
@@ -507,7 +507,7 @@ pub struct PatchValuePath {
     /// The multi-valued attribute being targeted.
     pub attr: AttrPath,
     /// The filter that selects which elements of the attribute to modify.
-    pub filter: Box<ValFilter>,
+    pub filter: ValFilter,
     /// Optional sub-attribute after the closing bracket (e.g. `"value"` in
     /// `emails[type eq "work"].value`). When `None`, the operation targets
     /// the entire matching element.
@@ -957,7 +957,9 @@ mod tests {
         let PatchPath::Value(vp) = p else {
             panic!("expected PatchPath::Value");
         };
-        assert!(matches!(*vp.filter, ValFilter::And(_, _)));
+        let ValFilter::And(_, _) = vp.filter else {
+            panic!("expected ValFilter::And, got {:?}", vp.filter);
+        };
         assert_eq!(vp.sub_attr.as_deref(), Some("value"));
     }
 

@@ -1,5 +1,5 @@
 // auto-generated: "lalrpop 0.23.1"
-// sha3: 12cee84f9f2c4381b57427d08550cf3ef389b79849c44e2e5a039d2fcc302bd4
+// sha3: 06392606ce7ae52c0157f0e98022c2ca81a253110c1a2db5a39b398fccc215b7
 use crate::filter::{
     AttrExp, AttrPath, CompareOp, CompValue, Filter, FilterActionError,
     PatchPath, PatchValuePath, ValFilter, ValuePath, parse_attr_path,
@@ -13683,7 +13683,7 @@ fn __action44<
 {
     PatchPath::Value(PatchValuePath {
         attr: a,
-        filter: Box::new(vf),
+        filter: vf,
         sub_attr: None,
     })
 }
@@ -13704,7 +13704,7 @@ fn __action45<
 {
     PatchPath::Value(PatchValuePath {
         attr: a,
-        filter: Box::new(vf),
+        filter: vf,
         sub_attr: Some(s.to_string()),
     })
 }

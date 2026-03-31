@@ -90,6 +90,7 @@ pub struct PatchOp {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
+#[expect(clippy::large_enum_variant)]
 pub enum OperationTarget {
     WithPath {
         path: PatchPath,
@@ -154,24 +155,33 @@ mod tests {
             .expect("Failed to deserialize patch operations");
         assert_eq!(ops.schemas, vec![PATCH_OP_SCHEMA]);
         assert_eq!(ops.operations.len(), 1);
-        assert!(matches!(
-            &ops.operations[0],
+        match &ops.operations[0] {
             PatchOperation::Remove {
-                path: PatchPath::Value(PatchValuePath {
-                    attr: AttrPath { uri: None, name: attr_name, sub_attr: None },
-                    filter,
-                    sub_attr: None,
-                })
+                path:
+                    PatchPath::Value(PatchValuePath {
+                        attr:
+                            AttrPath {
+                                uri: None,
+                                name: attr_name,
+                                sub_attr: None,
+                            },
+                        filter:
+                            ValFilter::Attr(AttrExp::Comparison(
+                                AttrPath {
+                                    uri: None,
+                                    name: inner_name,
+                                    sub_attr: None,
+                                },
+                                CompareOp::Eq,
+                                CompValue::Str(v),
+                            )),
+                        sub_attr: None,
+                    }),
             } if attr_name == "members"
-              && matches!(
-                  filter.as_ref(),
-                  ValFilter::Attr(AttrExp::Comparison(
-                      AttrPath { uri: None, name: inner_name, sub_attr: None },
-                      CompareOp::Eq,
-                      CompValue::Str(v),
-                  )) if inner_name == "value" && v == "2819c223-7f76-...413861904646"
-              )
-        ));
+                && inner_name == "value"
+                && v == "2819c223-7f76-...413861904646" => {}
+            other => panic!("unexpected operation: {other:?}"),
+        }
     }
 
     #[test]
@@ -194,35 +204,47 @@ mod tests {
             .expect("Failed to deserialize patch operations");
         assert_eq!(ops.schemas, vec![PATCH_OP_SCHEMA]);
         assert_eq!(ops.operations.len(), 1);
-        assert!(matches!(
-            &ops.operations[0],
+        match &ops.operations[0] {
             PatchOperation::Remove {
-                path: PatchPath::Value(PatchValuePath {
-                    attr: AttrPath { uri: None, name: attr_name, sub_attr: None },
-                    filter,
-                    sub_attr: None,
-                })
-            } if attr_name == "emails"
-              && matches!(
-                  filter.as_ref(),
-                  ValFilter::And(left, right)
-                  if matches!(
-                      left.as_ref(),
-                      ValFilter::Attr(AttrExp::Comparison(
-                          AttrPath { uri: None, name: n, sub_attr: None },
-                          CompareOp::Eq,
-                          CompValue::Str(v),
-                      )) if n == "type" && v == "work"
-                  ) && matches!(
-                      right.as_ref(),
-                      ValFilter::Attr(AttrExp::Comparison(
-                          AttrPath { uri: None, name: n, sub_attr: None },
-                          CompareOp::Ew,
-                          CompValue::Str(v),
-                      )) if n == "value" && v == "example.com"
-                  )
-              )
-        ));
+                path:
+                    PatchPath::Value(PatchValuePath {
+                        attr:
+                            AttrPath {
+                                uri: None,
+                                name: attr_name,
+                                sub_attr: None,
+                            },
+                        filter: ValFilter::And(left, right),
+                        sub_attr: None,
+                    }),
+            } if attr_name == "emails" => {
+                match left.as_ref() {
+                    ValFilter::Attr(AttrExp::Comparison(
+                        AttrPath {
+                            uri: None,
+                            name: n,
+                            sub_attr: None,
+                        },
+                        CompareOp::Eq,
+                        CompValue::Str(v),
+                    )) if n == "type" && v == "work" => {}
+                    other => panic!("unexpected left filter: {other:?}"),
+                }
+                match right.as_ref() {
+                    ValFilter::Attr(AttrExp::Comparison(
+                        AttrPath {
+                            uri: None,
+                            name: n,
+                            sub_attr: None,
+                        },
+                        CompareOp::Ew,
+                        CompValue::Str(v),
+                    )) if n == "value" && v == "example.com" => {}
+                    other => panic!("unexpected right filter: {other:?}"),
+                }
+            }
+            other => panic!("unexpected operation: {other:?}"),
+        }
     }
 
     #[test]
@@ -267,25 +289,32 @@ mod tests {
             .expect("Failed to deserialize patch operations");
         assert_eq!(ops.schemas, vec![PATCH_OP_SCHEMA]);
         assert_eq!(ops.operations.len(), 1);
-        assert!(matches!(
-            &ops.operations[0],
+        match &ops.operations[0] {
             PatchOperation::Replace(OperationTarget::WithPath {
-                path: PatchPath::Value(PatchValuePath {
-                    attr: AttrPath { uri: None, name: attr_name, sub_attr: None },
-                    filter,
-                    sub_attr: None,
-                }),
+                path:
+                    PatchPath::Value(PatchValuePath {
+                        attr:
+                            AttrPath {
+                                uri: None,
+                                name: attr_name,
+                                sub_attr: None,
+                            },
+                        filter:
+                            ValFilter::Attr(AttrExp::Comparison(
+                                AttrPath {
+                                    uri: None,
+                                    name: n,
+                                    sub_attr: None,
+                                },
+                                CompareOp::Eq,
+                                CompValue::Str(v),
+                            )),
+                        sub_attr: None,
+                    }),
                 ..
-            }) if attr_name == "addresses"
-              && matches!(
-                  filter.as_ref(),
-                  ValFilter::Attr(AttrExp::Comparison(
-                      AttrPath { uri: None, name: n, sub_attr: None },
-                      CompareOp::Eq,
-                      CompValue::Str(v),
-                  )) if n == "type" && v == "work"
-              )
-        ));
+            }) if attr_name == "addresses" && n == "type" && v == "work" => {}
+            other => panic!("unexpected operation: {other:?}"),
+        }
     }
 
     #[test]
@@ -304,20 +333,23 @@ mod tests {
                                 name: attr_name,
                                 sub_attr: None,
                             },
-                        filter,
+                        filter:
+                            ValFilter::Attr(AttrExp::Comparison(
+                                AttrPath {
+                                    uri: None,
+                                    name: n,
+                                    sub_attr: None,
+                                },
+                                CompareOp::Eq,
+                                CompValue::Str(v),
+                            )),
                         sub_attr: Some(sub_attr),
                     }),
                 value,
             }) if attr_name == "addresses"
                 && sub_attr == "streetAddress"
-                && matches!(
-                    filter.as_ref(),
-                    ValFilter::Attr(AttrExp::Comparison(
-                        AttrPath { uri: None, name: n, sub_attr: None },
-                        CompareOp::Eq,
-                        CompValue::Str(v),
-                    )) if n == "type" && v == "work"
-                ) =>
+                && n == "type"
+                && v == "work" =>
             {
                 assert_eq!(value.as_str(), Some("1010 Broadway Ave"));
             }

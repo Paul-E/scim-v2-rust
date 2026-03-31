@@ -167,13 +167,13 @@ pub Path: PatchPath = {
     // valuePath without trailing sub-attribute (e.g. emails[type eq "work"])
     <a:AttrPath> "[" <vf:ValFilter> "]" => PatchPath::Value(PatchValuePath {
         attr: a,
-        filter: Box::new(vf),
+        filter: vf,
         sub_attr: None,
     }),
     // valuePath with trailing sub-attribute (e.g. emails[type eq "work"].value)
     <a:AttrPath> "[" <vf:ValFilter> "]" "." <s:AttrNameTok> => PatchPath::Value(PatchValuePath {
         attr: a,
-        filter: Box::new(vf),
+        filter: vf,
         sub_attr: Some(s.to_string()),
     }),
 };
