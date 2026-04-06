@@ -124,11 +124,9 @@ impl<'de> Deserialize<'de> for OperationTarget {
                 Some(_) => {
                     return Err(serde::de::Error::custom(
                         "\"value\" must be a JSON object when \"path\" is absent",
-                    ))
+                    ));
                 }
-                None => {
-                    return Err(serde::de::Error::missing_field("value"))
-                }
+                None => return Err(serde::de::Error::missing_field("value")),
             };
             Ok(OperationTarget::WithoutPath { value })
         }
@@ -429,9 +427,8 @@ mod tests {
 
     #[test]
     fn test_okta_add_members_array_value() {
-        let ops: PatchOp =
-            serde_json::from_str(include_str!("../test_data/okta_add_members.json"))
-                .expect("Failed to deserialize Okta add members");
+        let ops: PatchOp = serde_json::from_str(include_str!("../test_data/okta_add_members.json"))
+            .expect("Failed to deserialize Okta add members");
         assert_eq!(ops.operations.len(), 1);
         match &ops.operations[0] {
             PatchOperation::Add(OperationTarget::WithPath { path, value }) => {
@@ -480,9 +477,10 @@ mod tests {
 
     #[test]
     fn test_jumpcloud_replace_user_fields() {
-        let ops: PatchOp =
-            serde_json::from_str(include_str!("../test_data/jumpcloud_replace_user_fields.json"))
-                .expect("Failed to deserialize JumpCloud user field replace");
+        let ops: PatchOp = serde_json::from_str(include_str!(
+            "../test_data/jumpcloud_replace_user_fields.json"
+        ))
+        .expect("Failed to deserialize JumpCloud user field replace");
         assert_eq!(ops.operations.len(), 3);
         // JumpCloud sends one op per attribute with path
         match &ops.operations[0] {
@@ -575,7 +573,10 @@ mod tests {
             }]
         }"#;
         let result: Result<PatchOp, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "malformed path must produce an error, not silently fallthrough");
+        assert!(
+            result.is_err(),
+            "malformed path must produce an error, not silently fallthrough"
+        );
     }
 
     #[test]
