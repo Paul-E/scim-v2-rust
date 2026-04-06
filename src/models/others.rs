@@ -1,3 +1,4 @@
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -88,7 +89,7 @@ pub struct PatchOp {
     pub operations: Vec<PatchOperation>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Debug)]
 #[serde(untagged)]
 #[expect(clippy::large_enum_variant)]
 pub enum OperationTarget {
@@ -101,13 +102,50 @@ pub enum OperationTarget {
     },
 }
 
+impl<'de> Deserialize<'de> for OperationTarget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut map = serde_json::Map::deserialize(deserializer)?;
+
+        if let Some(path_value) = map.remove("path") {
+            let path_str = path_value
+                .as_str()
+                .ok_or_else(|| serde::de::Error::custom("\"path\" must be a string"))?;
+            let path: PatchPath = path_str
+                .parse()
+                .map_err(|e| serde::de::Error::custom(format!("invalid SCIM path: {e}")))?;
+            let value = map.remove("value").unwrap_or(Value::Null);
+            Ok(OperationTarget::WithPath { path, value })
+        } else {
+            let value = match map.remove("value") {
+                Some(Value::Object(m)) => m,
+                Some(_) => {
+                    return Err(serde::de::Error::custom(
+                        "\"value\" must be a JSON object when \"path\" is absent",
+                    ))
+                }
+                None => {
+                    return Err(serde::de::Error::missing_field("value"))
+                }
+            };
+            Ok(OperationTarget::WithoutPath { value })
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "op")]
 pub enum PatchOperation {
     #[serde(rename = "add", alias = "Add", alias = "ADD")]
     Add(OperationTarget),
     #[serde(rename = "remove", alias = "Remove", alias = "REMOVE")]
-    Remove { path: PatchPath },
+    Remove {
+        path: PatchPath,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value: Option<Value>,
+    },
     #[serde(rename = "replace", alias = "Replace", alias = "REPLACE")]
     Replace(OperationTarget),
 }
@@ -177,6 +215,7 @@ mod tests {
                             )),
                         sub_attr: None,
                     }),
+                value: None,
             } if attr_name == "members"
                 && inner_name == "value"
                 && v == "2819c223-7f76-...413861904646" => {}
@@ -193,7 +232,8 @@ mod tests {
         assert!(matches!(
             &ops.operations[0],
             PatchOperation::Remove {
-                path: PatchPath::Attr(AttrPath { uri: None, name, sub_attr: None })
+                path: PatchPath::Attr(AttrPath { uri: None, name, sub_attr: None }),
+                value: None,
             } if name == "members"
         ));
     }
@@ -217,6 +257,7 @@ mod tests {
                         filter: ValFilter::And(left, right),
                         sub_attr: None,
                     }),
+                value: None,
             } if attr_name == "emails" => {
                 match left.as_ref() {
                     ValFilter::Attr(AttrExp::Comparison(
@@ -256,7 +297,8 @@ mod tests {
         assert!(matches!(
             &ops.operations[0],
             PatchOperation::Remove {
-                path: PatchPath::Attr(AttrPath { uri: None, name, sub_attr: None })
+                path: PatchPath::Attr(AttrPath { uri: None, name, sub_attr: None }),
+                value: None,
             } if name == "members"
         ));
         assert!(matches!(
@@ -367,5 +409,182 @@ mod tests {
             &ops.operations[0],
             PatchOperation::Replace(OperationTarget::WithoutPath { .. })
         ));
+    }
+
+    // ---- Okta provider tests ----
+
+    #[test]
+    fn test_okta_replace_deactivate() {
+        let ops: PatchOp =
+            serde_json::from_str(include_str!("../test_data/okta_replace_deactivate.json"))
+                .expect("Failed to deserialize Okta deactivation");
+        assert_eq!(ops.operations.len(), 1);
+        match &ops.operations[0] {
+            PatchOperation::Replace(OperationTarget::WithoutPath { value }) => {
+                assert_eq!(value.get("active").and_then(|v| v.as_bool()), Some(false));
+            }
+            other => panic!("expected Replace WithoutPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_okta_add_members_array_value() {
+        let ops: PatchOp =
+            serde_json::from_str(include_str!("../test_data/okta_add_members.json"))
+                .expect("Failed to deserialize Okta add members");
+        assert_eq!(ops.operations.len(), 1);
+        match &ops.operations[0] {
+            PatchOperation::Add(OperationTarget::WithPath { path, value }) => {
+                assert_eq!(
+                    path,
+                    &PatchPath::Attr(AttrPath {
+                        uri: None,
+                        name: "members".into(),
+                        sub_attr: None,
+                    })
+                );
+                let arr = value.as_array().expect("value should be an array");
+                assert_eq!(arr.len(), 1);
+                assert_eq!(arr[0]["display"], "user@example.com");
+                // Okta does NOT send "type" in member objects
+                assert!(arr[0].get("type").is_none());
+            }
+            other => panic!("expected Add WithPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_okta_replace_members_array_value() {
+        let ops: PatchOp =
+            serde_json::from_str(include_str!("../test_data/okta_replace_members.json"))
+                .expect("Failed to deserialize Okta replace members");
+        assert_eq!(ops.operations.len(), 1);
+        match &ops.operations[0] {
+            PatchOperation::Replace(OperationTarget::WithPath { path, value }) => {
+                assert_eq!(
+                    path,
+                    &PatchPath::Attr(AttrPath {
+                        uri: None,
+                        name: "members".into(),
+                        sub_attr: None,
+                    })
+                );
+                let arr = value.as_array().expect("value should be an array");
+                assert_eq!(arr.len(), 2);
+            }
+            other => panic!("expected Replace WithPath, got {other:?}"),
+        }
+    }
+
+    // ---- JumpCloud provider tests ----
+
+    #[test]
+    fn test_jumpcloud_replace_user_fields() {
+        let ops: PatchOp =
+            serde_json::from_str(include_str!("../test_data/jumpcloud_replace_user_fields.json"))
+                .expect("Failed to deserialize JumpCloud user field replace");
+        assert_eq!(ops.operations.len(), 3);
+        // JumpCloud sends one op per attribute with path
+        match &ops.operations[0] {
+            PatchOperation::Replace(OperationTarget::WithPath { path, value }) => {
+                assert_eq!(
+                    path,
+                    &PatchPath::Attr(AttrPath {
+                        uri: None,
+                        name: "name".into(),
+                        sub_attr: Some("givenName".into()),
+                    })
+                );
+                assert_eq!(value.as_str(), Some("John"));
+            }
+            other => panic!("expected Replace WithPath for givenName, got {other:?}"),
+        }
+        // Third op: active = false (scalar bool value)
+        match &ops.operations[2] {
+            PatchOperation::Replace(OperationTarget::WithPath { path, value }) => {
+                assert_eq!(
+                    path,
+                    &PatchPath::Attr(AttrPath {
+                        uri: None,
+                        name: "active".into(),
+                        sub_attr: None,
+                    })
+                );
+                assert_eq!(value.as_bool(), Some(false));
+            }
+            other => panic!("expected Replace WithPath for active, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_jumpcloud_add_member_minimal() {
+        let ops: PatchOp =
+            serde_json::from_str(include_str!("../test_data/jumpcloud_add_member.json"))
+                .expect("Failed to deserialize JumpCloud add member");
+        assert_eq!(ops.operations.len(), 1);
+        match &ops.operations[0] {
+            PatchOperation::Add(OperationTarget::WithPath { value, .. }) => {
+                let arr = value.as_array().expect("value should be an array");
+                assert_eq!(arr.len(), 1);
+                // JumpCloud sends minimal member objects: just "value", no display/type
+                assert_eq!(arr[0]["value"], "jc-user-uuid-001");
+                assert!(arr[0].get("display").is_none());
+                assert!(arr[0].get("type").is_none());
+            }
+            other => panic!("expected Add WithPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_jumpcloud_remove_member_with_value() {
+        let ops: PatchOp = serde_json::from_str(include_str!(
+            "../test_data/jumpcloud_remove_member_with_value.json"
+        ))
+        .expect("Failed to deserialize JumpCloud remove member with value");
+        assert_eq!(ops.operations.len(), 1);
+        match &ops.operations[0] {
+            PatchOperation::Remove {
+                path,
+                value: Some(v),
+            } => {
+                assert_eq!(
+                    path,
+                    &PatchPath::Attr(AttrPath {
+                        uri: None,
+                        name: "members".into(),
+                        sub_attr: None,
+                    })
+                );
+                let arr = v.as_array().expect("value should be an array");
+                assert_eq!(arr[0]["value"], "jc-user-uuid-001");
+            }
+            other => panic!("expected Remove with value, got {other:?}"),
+        }
+    }
+
+    // ---- Negative tests: malformed path must NOT silently fallthrough ----
+
+    #[test]
+    fn test_malformed_path_returns_error() {
+        let json = r#"{
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [{
+                "op": "replace",
+                "path": "emails[broken!!!filter",
+                "value": {"displayName": "pwned"}
+            }]
+        }"#;
+        let result: Result<PatchOp, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "malformed path must produce an error, not silently fallthrough");
+    }
+
+    #[test]
+    fn test_invalid_op_returns_error() {
+        let json = r#"{
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [{"op": "delete", "path": "members"}]
+        }"#;
+        let result: Result<PatchOp, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "invalid op 'delete' must produce an error");
     }
 }
