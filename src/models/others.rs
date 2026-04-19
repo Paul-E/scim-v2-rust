@@ -104,16 +104,15 @@ where
         let schemas_iter = value
             .get("schemas")
             .map(|v| {
-                let schema_array = v.as_array()
-                    .ok_or_else(|| {
-                        serde::de::Error::custom("\"schemas\" must be a JSON array of strings")
-                    })?;
+                let schema_array = v.as_array().ok_or_else(|| {
+                    serde::de::Error::custom("\"schemas\" must be a JSON array of strings")
+                })?;
 
-                    let iter = schema_array.iter().map(|item| {
-                        item.as_str().ok_or_else(|| {
-                            serde::de::Error::custom("\"schemas\" entries must be strings")
-                        })
-                    });
+                let iter = schema_array.iter().map(|item| {
+                    item.as_str().ok_or_else(|| {
+                        serde::de::Error::custom("\"schemas\" entries must be strings")
+                    })
+                });
                 Ok(iter)
             })
             .transpose()?;
@@ -132,7 +131,7 @@ where
                     schema_urns::GROUP => is_group = true,
                     schema_urns::SCHEMA => is_schema = true,
                     schema_urns::RESOURCE_TYPE => is_resource_type = true,
-                    _ => continue
+                    _ => continue,
                 }
             }
             if total == 0 {

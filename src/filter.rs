@@ -723,17 +723,15 @@ impl std::str::FromStr for PatchPath {
             .map_err(|e| e.map_token(|t| t.to_string()))?;
         match parsed {
             PatchPath::Attr(a) => Ok(PatchPath::Attr(a)),
-            PatchPath::Value(vp) => {
-                match val_filter_depth_exceeds(&vp.filter, MAX_FILTER_DEPTH) {
-                    Some(depth) => {
-                        drop_val_filter_iteratively(vp.filter);
-                        Err(LalrParseError::User {
-                            error: FilterActionError::DepthExceeded(depth),
-                        })
-                    }
-                    None => Ok(PatchPath::Value(vp)),
+            PatchPath::Value(vp) => match val_filter_depth_exceeds(&vp.filter, MAX_FILTER_DEPTH) {
+                Some(depth) => {
+                    drop_val_filter_iteratively(vp.filter);
+                    Err(LalrParseError::User {
+                        error: FilterActionError::DepthExceeded(depth),
+                    })
                 }
-            }
+                None => Ok(PatchPath::Value(vp)),
+            },
         }
     }
 }
