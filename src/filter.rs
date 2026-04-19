@@ -16,6 +16,15 @@
 //! - [`PatchOperation`](crate::models::others::PatchOperation) — each operation's
 //!   `path` field deserializes as a [`PatchPath`].
 //!
+//! By default these types fail deserialization when the filter expression is
+//! malformed, which takes `start_index`, `count`, and other fields down with
+//! it. To produce an RFC 7644 §3.12 `invalidFilter` response instead, use the
+//! [`TolerantListQuery`](crate::models::others::TolerantListQuery) /
+//! [`TolerantSearchRequest`](crate::models::others::TolerantSearchRequest)
+//! aliases (equivalently `ListQuery<MaybeFilter>` / `SearchRequest<MaybeFilter>`)
+//! and match on [`MaybeFilter::Valid`] vs [`MaybeFilter::Invalid`] to build
+//! the error body from the captured `raw` string and [`ParseError`].
+//!
 //! Once you have a [`Filter`], recursively `match` on its variants to evaluate it:
 //!
 //! ```
@@ -189,6 +198,42 @@ impl<'de> Deserialize<'de> for Filter {
     {
         let s = String::deserialize(deserializer)?;
         s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// Deserialize-side wrapper that rescues invalid filter expressions.
+///
+/// SCIM handlers that receive a malformed `?filter=...` need to return a
+/// `400 invalidFilter` response per RFC 7644 §3.12. Using this wrapper in
+/// place of [`Filter`] lets the surrounding
+/// [`ListQuery`](crate::models::others::ListQuery) /
+/// [`SearchRequest`](crate::models::others::SearchRequest) deserialize
+/// successfully so the handler can inspect `start_index`, `count`, etc. and
+/// produce an RFC-compliant error body instead of a generic 400.
+///
+/// `MaybeFilter` intentionally does **not** implement `Serialize`. To emit a
+/// filter on the wire, pattern-match the [`MaybeFilter::Valid`] variant and
+/// serialize the inner [`Filter`] — `Filter` itself is `Serialize`.
+#[derive(Debug)]
+pub enum MaybeFilter {
+    /// The filter string parsed successfully.
+    Valid(Filter),
+    /// The filter string did not parse. `raw` is the original input; `error`
+    /// is the underlying [`ParseError`] for constructing an RFC 7644 §3.12
+    /// `invalidFilter` error response.
+    Invalid { raw: String, error: ParseError },
+}
+
+impl<'de> Deserialize<'de> for MaybeFilter {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.parse::<Filter>() {
+            Ok(f) => Ok(MaybeFilter::Valid(f)),
+            Err(e) => Ok(MaybeFilter::Invalid { raw: s, error: e }),
+        }
     }
 }
 

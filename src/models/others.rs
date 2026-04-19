@@ -2,27 +2,36 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::filter::{Filter, PatchPath};
+use crate::filter::{Filter, MaybeFilter, PatchPath};
 use crate::models::group::Group;
 use crate::models::resource_types::ResourceType;
 use crate::models::scim_schema::Schema;
 use crate::models::user::User;
 
+/// Server-side variant of [`ListQuery`] that tolerates malformed filter
+/// expressions so the handler can produce an RFC 7644 §3.12 `invalidFilter`
+/// error response instead of aborting deserialization of the whole query.
+pub type TolerantListQuery = ListQuery<MaybeFilter>;
+
+/// Server-side variant of [`SearchRequest`] with the same tolerant filter
+/// behavior as [`TolerantListQuery`].
+pub type TolerantSearchRequest = SearchRequest<MaybeFilter>;
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
-pub struct SearchRequest {
+pub struct SearchRequest<F = Filter> {
     pub schemas: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attributes: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     excluded_attributes: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub filter: Option<Filter>,
+    pub filter: Option<F>,
     pub start_index: i64,
     pub count: i64,
 }
 
-impl Default for SearchRequest {
+impl<F> Default for SearchRequest<F> {
     fn default() -> Self {
         SearchRequest {
             schemas: vec!["urn:ietf:params:scim:api:messages:2.0:SearchRequest".to_string()],
@@ -37,9 +46,9 @@ impl Default for SearchRequest {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
-pub struct ListQuery {
+pub struct ListQuery<F = Filter> {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub filter: Option<Filter>,
+    pub filter: Option<F>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_index: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,7 +59,7 @@ pub struct ListQuery {
     pub excluded_attributes: Option<String>,
 }
 
-impl Default for ListQuery {
+impl<F> Default for ListQuery<F> {
     fn default() -> Self {
         ListQuery {
             filter: None,
@@ -587,5 +596,95 @@ mod tests {
         }"#;
         let result: Result<PatchOp, _> = serde_json::from_str(json);
         assert!(result.is_err(), "invalid op 'delete' must produce an error");
+    }
+
+    // ---- Tolerant filter deserialization (RFC 7644 §3.12) ----
+
+    #[test]
+    fn test_tolerant_list_query_valid_filter() {
+        let json = r#"{
+            "filter": "userName eq \"alice\"",
+            "count": 50
+        }"#;
+        let q: TolerantListQuery =
+            serde_json::from_str(json).expect("deserialization must succeed");
+        assert_eq!(q.count, Some(50));
+        match q.filter {
+            Some(MaybeFilter::Valid(_)) => {}
+            other => panic!("expected Valid filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_tolerant_list_query_invalid_filter_preserves_other_fields() {
+        // Unterminated string literal — parser must reject this filter but
+        // the surrounding query should still deserialize so the handler can
+        // return a proper 400 invalidFilter response.
+        let json = r#"{
+            "filter": "userName eq \"alice",
+            "count": 50,
+            "startIndex": 2
+        }"#;
+        let q: TolerantListQuery =
+            serde_json::from_str(json).expect("tolerant deserialization must succeed");
+        assert_eq!(q.count, Some(50));
+        assert_eq!(q.start_index, Some(2));
+        match q.filter {
+            Some(MaybeFilter::Invalid { raw, error: _ }) => {
+                assert_eq!(raw, r#"userName eq "alice"#);
+            }
+            other => panic!("expected Invalid filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_strict_list_query_rejects_invalid_filter() {
+        // The non-tolerant variant must still hard-fail on a malformed
+        // filter, preserving the existing strict contract for callers that
+        // opt in to the default.
+        let json = r#"{
+            "filter": "userName eq \"alice",
+            "count": 50
+        }"#;
+        let result: Result<ListQuery, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "strict ListQuery<Filter> must reject malformed filters"
+        );
+    }
+
+    #[test]
+    fn test_tolerant_search_request_invalid_filter_preserves_other_fields() {
+        let json = r#"{
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:SearchRequest"],
+            "filter": "emails[type eq",
+            "startIndex": 3,
+            "count": 25
+        }"#;
+        let req: TolerantSearchRequest =
+            serde_json::from_str(json).expect("tolerant deserialization must succeed");
+        assert_eq!(req.start_index, 3);
+        assert_eq!(req.count, 25);
+        assert!(matches!(
+            req.filter,
+            Some(MaybeFilter::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn test_strict_list_query_round_trip() {
+        // The documented client-side build-and-serialize path still works
+        // unchanged under the default F = Filter.
+        let filter: Filter = r#"userName eq "alice""#.parse().unwrap();
+        let q = ListQuery {
+            filter: Some(filter),
+            count: Some(10),
+            ..ListQuery::default()
+        };
+        let json = serde_json::to_string(&q).expect("serialize ListQuery<Filter>");
+        assert!(json.contains(r#""filter":"userName eq \"alice\"""#));
+        let round: ListQuery = serde_json::from_str(&json).expect("round-trip");
+        assert_eq!(round.count, Some(10));
+        assert!(matches!(round.filter, Some(Filter::Attr(_))));
     }
 }
