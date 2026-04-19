@@ -101,6 +101,7 @@ pub mod models {
 #[allow(clippy::all)]
 pub(crate) mod filter_parser;
 pub mod filter;
+pub mod schema_urns;
 
 /// Declaring the utils module which contains the error submodule
 pub mod utils {

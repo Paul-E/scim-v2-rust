@@ -66,7 +66,7 @@ pub struct User<T = String> {
 impl<T> Default for User<T> {
     fn default() -> Self {
         User {
-            schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:User".to_string()],
+            schemas: vec![crate::schema_urns::USER.to_string()],
             user_name: "".to_string(),
             id: None,
             external_id: None,

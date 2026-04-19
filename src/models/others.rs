@@ -1,4 +1,4 @@
-use serde::de::Deserializer;
+use serde::de::{DeserializeOwned, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -7,6 +7,7 @@ use crate::models::group::Group;
 use crate::models::resource_types::ResourceType;
 use crate::models::scim_schema::Schema;
 use crate::models::user::User;
+use crate::schema_urns;
 
 /// Server-side variant of [`ListQuery`] that tolerates malformed filter
 /// expressions so the handler can produce an RFC 7644 §3.12 `invalidFilter`
@@ -34,7 +35,7 @@ pub struct SearchRequest<F = Filter> {
 impl<F> Default for SearchRequest<F> {
     fn default() -> Self {
         SearchRequest {
-            schemas: vec!["urn:ietf:params:scim:api:messages:2.0:SearchRequest".to_string()],
+            schemas: vec![schema_urns::SEARCH_REQUEST.to_string()],
             attributes: None,
             excluded_attributes: None,
             filter: None,
@@ -71,7 +72,16 @@ impl<F> Default for ListQuery<F> {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+/// Heterogeneous SCIM resource type used inside [`ListResponse`].
+///
+/// Deserialization dispatches on the SCIM schema URN carried in the payload's
+/// `schemas` attribute (RFC 7643 §3). `Schema` and `ResourceType` resources,
+/// which per RFC 7643 §§6-7 are often served without a `schemas` field, are
+/// disambiguated by structural markers: the `attributes` array (Schema) or
+/// the `endpoint` + `schema` fields (ResourceType). Payloads that do not
+/// carry a recognized discriminator are rejected rather than silently
+/// classified, to prevent type confusion.
+#[derive(Serialize, Debug)]
 #[serde(untagged)]
 pub enum Resource<T> {
     User(Box<User<T>>),
@@ -80,8 +90,115 @@ pub enum Resource<T> {
     ResourceType(Box<ResourceType>),
 }
 
+impl<'de, T> Deserialize<'de> for Resource<T>
+where
+    T: DeserializeOwned,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let map = serde_json::Map::deserialize(deserializer)?;
+        let value = Value::Object(map);
+
+        let schemas_iter = value
+            .get("schemas")
+            .map(|v| {
+                let schema_array = v.as_array()
+                    .ok_or_else(|| {
+                        serde::de::Error::custom("\"schemas\" must be a JSON array of strings")
+                    })?;
+
+                    let iter = schema_array.iter().map(|item| {
+                        item.as_str().ok_or_else(|| {
+                            serde::de::Error::custom("\"schemas\" entries must be strings")
+                        })
+                    });
+                Ok(iter)
+            })
+            .transpose()?;
+
+        if let Some(urns) = schemas_iter {
+            let mut total: usize = 0;
+            let mut is_user = false;
+            let mut is_group = false;
+            let mut is_schema = false;
+            let mut is_resource_type = false;
+            for urn in urns {
+                let urn = urn?;
+                total += 1;
+                match urn {
+                    schema_urns::ENTERPRISE_USER | schema_urns::USER => is_user = true,
+                    schema_urns::GROUP => is_group = true,
+                    schema_urns::SCHEMA => is_schema = true,
+                    schema_urns::RESOURCE_TYPE => is_resource_type = true,
+                    _ => continue
+                }
+            }
+            if total == 0 {
+                return Err(serde::de::Error::custom(
+                    "\"schemas\" array is empty; cannot determine SCIM resource type",
+                ));
+            }
+            let matched = is_user as u8 + is_group as u8 + is_schema as u8 + is_resource_type as u8;
+            if matched > 1 {
+                return Err(serde::de::Error::custom(
+                    "ambiguous schemas: multiple SCIM resource-type URNs present",
+                ));
+            }
+
+            if is_user {
+                return serde_json::from_value::<User<T>>(value)
+                    .map(|u| Resource::User(Box::new(u)))
+                    .map_err(serde::de::Error::custom);
+            } else if is_group {
+                return serde_json::from_value::<Group<T>>(value)
+                    .map(|g| Resource::Group(Box::new(g)))
+                    .map_err(serde::de::Error::custom);
+            } else if is_schema {
+                return serde_json::from_value::<Schema>(value)
+                    .map(|s| Resource::Schema(Box::new(s)))
+                    .map_err(serde::de::Error::custom);
+            } else if is_resource_type {
+                return serde_json::from_value::<ResourceType>(value)
+                    .map(|r| Resource::ResourceType(Box::new(r)))
+                    .map_err(serde::de::Error::custom);
+            }
+
+            return Err(serde::de::Error::custom(
+                "\"schemas\" contains no recognized SCIM resource-type URN",
+            ));
+        }
+
+        // No "schemas" field. Per RFC 7643 §§6-7, Schema and ResourceType
+        // resources may appear without one. User and Group MUST carry their
+        // URN and are not eligible for structural fallback.
+        let has_attributes = value
+            .get("attributes")
+            .map(Value::is_array)
+            .unwrap_or(false);
+        let has_endpoint = value.get("endpoint").map(Value::is_string).unwrap_or(false);
+        let has_schema_field = value.get("schema").map(Value::is_string).unwrap_or(false);
+
+        if has_attributes {
+            return serde_json::from_value::<Schema>(value)
+                .map(|s| Resource::Schema(Box::new(s)))
+                .map_err(serde::de::Error::custom);
+        }
+        if has_endpoint && has_schema_field {
+            return serde_json::from_value::<ResourceType>(value)
+                .map(|r| Resource::ResourceType(Box::new(r)))
+                .map_err(serde::de::Error::custom);
+        }
+
+        Err(serde::de::Error::custom(
+            "cannot determine SCIM resource type: missing \"schemas\" field and no structural discriminator",
+        ))
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", bound(deserialize = "T: DeserializeOwned"))]
 pub struct ListResponse<T> {
     pub items_per_page: i64,
     pub total_results: i64,
@@ -165,7 +282,7 @@ mod tests {
     };
     use pretty_assertions::assert_eq;
 
-    const PATCH_OP_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
+    const PATCH_OP_SCHEMA: &str = schema_urns::PATCH_OP;
 
     #[test]
     fn test_patch_op_01_add_with_path() {
@@ -683,5 +800,323 @@ mod tests {
         let round: ListQuery = serde_json::from_str(&json).expect("round-trip");
         assert_eq!(round.count, Some(10));
         assert!(matches!(round.filter, Some(Filter::Attr(_))));
+    }
+
+    // ---- Resource<T> URN-based dispatch (RFC 7643 §§3-4) ----
+
+    mod resource_dispatch {
+        use super::*;
+        use crate::models::group::Group;
+        use crate::models::resource_types::ResourceType;
+        use crate::models::scim_schema::Schema;
+        use crate::models::user::User;
+        use pretty_assertions::assert_eq;
+
+        fn user_json() -> String {
+            format!(
+                r#"{{
+                    "schemas": ["{user}"],
+                    "id": "u-1",
+                    "userName": "alice@example.com"
+                }}"#,
+                user = schema_urns::USER
+            )
+        }
+
+        fn group_json() -> String {
+            format!(
+                r#"{{
+                    "schemas": ["{group}"],
+                    "id": "g-1",
+                    "displayName": "Admins"
+                }}"#,
+                group = schema_urns::GROUP
+            )
+        }
+
+        fn schema_json() -> String {
+            format!(
+                r#"{{
+                    "schemas": ["{schema}"],
+                    "id": "{user}",
+                    "name": "User",
+                    "description": "SCIM User schema",
+                    "attributes": [],
+                    "meta": {{}}
+                }}"#,
+                schema = schema_urns::SCHEMA,
+                user = schema_urns::USER
+            )
+        }
+
+        fn resource_type_json() -> String {
+            format!(
+                r#"{{
+                    "schemas": ["{rt}"],
+                    "id": "User",
+                    "name": "User",
+                    "endpoint": "/Users",
+                    "schema": "{user}"
+                }}"#,
+                rt = schema_urns::RESOURCE_TYPE,
+                user = schema_urns::USER
+            )
+        }
+
+        #[test]
+        fn dispatches_user_by_urn() {
+            let parsed: Resource<String> = serde_json::from_str(&user_json()).unwrap();
+            match parsed {
+                Resource::User(u) => {
+                    assert_eq!(u.user_name, "alice@example.com");
+                    assert_eq!(u.id.as_deref(), Some("u-1"));
+                }
+                other => panic!("expected User, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn dispatches_group_by_urn() {
+            let parsed: Resource<String> = serde_json::from_str(&group_json()).unwrap();
+            match parsed {
+                Resource::Group(g) => {
+                    assert_eq!(g.display_name, "Admins");
+                    assert_eq!(g.id.as_deref(), Some("g-1"));
+                }
+                other => panic!("expected Group, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn dispatches_user_with_enterprise_extension() {
+            let json = format!(
+                r#"{{
+                    "schemas": ["{user}", "{ent}"],
+                    "id": "u-1",
+                    "userName": "bob@example.com"
+                }}"#,
+                user = schema_urns::USER,
+                ent = schema_urns::ENTERPRISE_USER
+            );
+            let parsed: Resource<String> = serde_json::from_str(&json).unwrap();
+            assert!(matches!(parsed, Resource::User(_)));
+        }
+
+        #[test]
+        fn dispatches_enterprise_user_only_as_user() {
+            // Real-world non-conformant providers sometimes ship only the
+            // enterprise extension URN. Treat it as a User signal.
+            let json = format!(
+                r#"{{
+                    "schemas": ["{ent}"],
+                    "userName": "carol@example.com"
+                }}"#,
+                ent = schema_urns::ENTERPRISE_USER
+            );
+            let parsed: Resource<String> = serde_json::from_str(&json).unwrap();
+            assert!(matches!(parsed, Resource::User(_)));
+        }
+
+        #[test]
+        fn dispatches_schema_by_urn() {
+            let parsed: Resource<String> = serde_json::from_str(&schema_json()).unwrap();
+            assert!(matches!(parsed, Resource::Schema(_)));
+        }
+
+        #[test]
+        fn dispatches_schema_without_schemas_field_via_attributes() {
+            // /Schemas responses often omit a top-level `schemas` field; the
+            // `attributes` array is the structural discriminator per RFC 7643 §7.
+            let json = format!(
+                r#"{{
+                    "id": "{user}",
+                    "name": "User",
+                    "description": "SCIM User schema",
+                    "attributes": [],
+                    "meta": {{}}
+                }}"#,
+                user = schema_urns::USER
+            );
+            let parsed: Resource<String> = serde_json::from_str(&json).unwrap();
+            assert!(matches!(parsed, Resource::Schema(_)));
+        }
+
+        #[test]
+        fn dispatches_resource_type_by_urn() {
+            let parsed: Resource<String> = serde_json::from_str(&resource_type_json()).unwrap();
+            assert!(matches!(parsed, Resource::ResourceType(_)));
+        }
+
+        #[test]
+        fn dispatches_resource_type_without_schemas_field() {
+            let json = format!(
+                r#"{{
+                    "id": "User",
+                    "name": "User",
+                    "endpoint": "/Users",
+                    "schema": "{user}"
+                }}"#,
+                user = schema_urns::USER
+            );
+            let parsed: Resource<String> = serde_json::from_str(&json).unwrap();
+            assert!(matches!(parsed, Resource::ResourceType(_)));
+        }
+
+        #[test]
+        fn rejects_ambiguous_user_and_group_urns() {
+            // The confusion attack: overlapping fields plus both URNs.
+            let json = format!(
+                r#"{{
+                    "schemas": ["{user}", "{group}"],
+                    "id": "x-1",
+                    "userName": "mallory@example.com",
+                    "displayName": "Mallory"
+                }}"#,
+                user = schema_urns::USER,
+                group = schema_urns::GROUP
+            );
+            let err = serde_json::from_str::<Resource<String>>(&json).unwrap_err();
+            assert!(
+                err.to_string().to_lowercase().contains("ambiguous"),
+                "expected ambiguity error, got: {err}"
+            );
+        }
+
+        #[test]
+        fn rejects_empty_schemas() {
+            let json = r#"{
+                "schemas": [],
+                "userName": "dave@example.com"
+            }"#;
+            let err = serde_json::from_str::<Resource<String>>(json).unwrap_err();
+            assert!(err.to_string().contains("empty"), "got: {err}");
+        }
+
+        #[test]
+        fn rejects_unknown_urn_with_structural_overlap() {
+            // A payload that today would silently deserialize as User (userName
+            // present, schemas listed) must now be rejected because the URN is
+            // not recognized. Attacker-crafted shape.
+            let json = r#"{
+                "schemas": ["urn:evil:fake"],
+                "userName": "eve@example.com",
+                "displayName": "Eve"
+            }"#;
+            let err = serde_json::from_str::<Resource<String>>(json).unwrap_err();
+            assert!(
+                err.to_string().contains("no recognized"),
+                "expected URN-recognition error, got: {err}"
+            );
+        }
+
+        #[test]
+        fn rejects_missing_discriminators() {
+            let json = r#"{
+                "id": "x-1",
+                "externalId": "ext-1"
+            }"#;
+            let err = serde_json::from_str::<Resource<String>>(json).unwrap_err();
+            assert!(err.to_string().contains("cannot determine"), "got: {err}");
+        }
+
+        #[test]
+        fn group_payload_is_not_misclassified_as_user() {
+            // Exact attack shape from the review. A Group with a User URN
+            // should not be silently accepted; but a Group with the correct
+            // Group URN must always land as Group even if User-ish fields
+            // could structurally parse.
+            let parsed: Resource<String> = serde_json::from_str(&group_json()).unwrap();
+            match parsed {
+                Resource::Group(g) => assert_eq!(g.display_name, "Admins"),
+                other => panic!("expected Group, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn user_urn_with_malformed_user_surfaces_inner_error() {
+            // schemas asserts this IS a User. Missing `userName` must surface
+            // as an error — NOT fall through to the Group variant.
+            let json = format!(
+                r#"{{
+                    "schemas": ["{user}"],
+                    "id": "u-1"
+                }}"#,
+                user = schema_urns::USER
+            );
+            let err = serde_json::from_str::<Resource<String>>(&json).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("userName") || msg.contains("user_name"),
+                "expected inner User error mentioning userName, got: {msg}"
+            );
+        }
+
+        #[test]
+        fn round_trip_user() {
+            let u: User = User::default();
+            let r = Resource::User(Box::new(u));
+            let json = serde_json::to_string(&r).unwrap();
+            let back: Resource<String> = serde_json::from_str(&json).unwrap();
+            assert!(matches!(back, Resource::User(_)));
+        }
+
+        #[test]
+        fn round_trip_group() {
+            let g: Group = Group {
+                schemas: vec![schema_urns::GROUP.to_string()],
+                id: Some("g-1".to_string()),
+                external_id: None,
+                display_name: "Admins".to_string(),
+                members: None,
+                meta: None,
+            };
+            let r = Resource::Group(Box::new(g));
+            let json = serde_json::to_string(&r).unwrap();
+            let back: Resource<String> = serde_json::from_str(&json).unwrap();
+            match back {
+                Resource::Group(g) => assert_eq!(g.display_name, "Admins"),
+                other => panic!("expected Group after round-trip, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn round_trip_schema() {
+            let s: Schema = serde_json::from_str(&schema_json()).unwrap();
+            let r: Resource<String> = Resource::Schema(Box::new(s));
+            let json = serde_json::to_string(&r).unwrap();
+            let back: Resource<String> = serde_json::from_str(&json).unwrap();
+            assert!(matches!(back, Resource::Schema(_)));
+        }
+
+        #[test]
+        fn round_trip_resource_type() {
+            let rt: ResourceType = serde_json::from_str(&resource_type_json()).unwrap();
+            let r: Resource<String> = Resource::ResourceType(Box::new(rt));
+            let json = serde_json::to_string(&r).unwrap();
+            let back: Resource<String> = serde_json::from_str(&json).unwrap();
+            assert!(matches!(back, Resource::ResourceType(_)));
+        }
+
+        #[test]
+        fn list_response_mixed_resources() {
+            let json = format!(
+                r#"{{
+                    "itemsPerPage": 3,
+                    "totalResults": 3,
+                    "startIndex": 1,
+                    "schemas": ["{lr}"],
+                    "Resources": [{user}, {group}, {schema}]
+                }}"#,
+                lr = schema_urns::LIST_RESPONSE,
+                user = user_json(),
+                group = group_json(),
+                schema = schema_json()
+            );
+            let list: ListResponse<String> = serde_json::from_str(&json).unwrap();
+            assert_eq!(list.resources.len(), 3);
+            assert!(matches!(list.resources[0], Resource::User(_)));
+            assert!(matches!(list.resources[1], Resource::Group(_)));
+            assert!(matches!(list.resources[2], Resource::Schema(_)));
+        }
     }
 }
