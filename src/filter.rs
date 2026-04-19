@@ -48,6 +48,18 @@
 //! assert!(!matches_user(&filter, "jsmith"));
 //! ```
 //!
+//! # Depth limit
+//!
+//! [`Filter::from_str`] and [`PatchPath::from_str`] (and the corresponding
+//! [`Deserialize`](serde::Deserialize) impls, which delegate to
+//! [`FromStr`](std::str::FromStr)) reject any input whose parsed AST would exceed
+//! [`MAX_FILTER_DEPTH`]. This bounds the call stack used by the crate's own
+//! recursive [`Display`], derived [`PartialEq`] / [`Debug`], serialization, and
+//! `Drop` impls, so a hostile `?filter=` value with thousands of chained
+//! `not`/`and`/`or` operators cannot crash the server after the filter has
+//! been accepted. Hand-constructed [`Filter`] values bypass this check and are
+//! the caller's responsibility.
+//!
 //! # SCIM client: building a filter to send in a request
 //!
 //! Construct the AST directly and assign it to the `filter` field of
@@ -77,7 +89,25 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{Display, Formatter};
 use thiserror::Error;
 
-/// Error produced by fallible grammar actions (`=>?` rules in the LALRPOP grammar).
+/// Maximum allowed nesting depth for a parsed [`Filter`] or [`ValFilter`] tree.
+///
+/// [`Filter::from_str`] and [`PatchPath::from_str`] reject any input whose parsed
+/// AST would exceed this depth, returning
+/// [`ParseError::User`] wrapping [`FilterActionError::DepthExceeded`]. The same
+/// enforcement runs on the [`Deserialize`] paths (SCIM `SearchRequest.filter`,
+/// `ListQuery.filter`, `PatchOperation.path`), so a remote attacker cannot submit
+/// a pathologically nested filter like `(((…(title pr)…)))` or
+/// `a pr and a pr and …` that would later overflow the call stack when the
+/// library's recursive [`Display`], derived [`PartialEq`] / [`Debug`],
+/// [`Serialize`], or [`Drop`] impls walk the tree.
+///
+/// Hand-constructed [`Filter`] values that bypass the parser do not pass through
+/// this check; it is the caller's responsibility to keep programmatically built
+/// filters within this limit.
+pub const MAX_FILTER_DEPTH: usize = 64;
+
+/// Error produced by fallible grammar actions (`=>?` rules in the LALRPOP grammar)
+/// and by post-parse validation.
 #[derive(Debug, Error)]
 pub enum FilterActionError {
     /// An `attrPath` token contained more than one sub-attribute segment.
@@ -86,6 +116,11 @@ pub enum FilterActionError {
     /// A comparison value contained an invalid JSON escape or format.
     #[error("invalid comparison value: {0}")]
     InvalidCompValue(#[from] serde_json::Error),
+    /// The parsed filter's nesting depth exceeded [`MAX_FILTER_DEPTH`].
+    ///
+    /// The wrapped value is the depth at which the limit was first breached.
+    #[error("filter nesting depth exceeds maximum of {MAX_FILTER_DEPTH} (at depth {0})")]
+    DepthExceeded(usize),
 }
 
 /// Error returned by [`Filter::from_str`] and [`PatchPath::from_str`] when the
@@ -241,9 +276,16 @@ impl std::str::FromStr for Filter {
     type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        crate::filter_parser::FilterParser::new()
+        let parsed = crate::filter_parser::FilterParser::new()
             .parse(s.trim())
-            .map_err(|e| e.map_token(|t| t.to_string()))
+            .map_err(|e| e.map_token(|t| t.to_string()))?;
+        if let Some(depth) = filter_depth_exceeds(&parsed, MAX_FILTER_DEPTH) {
+            drop_filter_iteratively(parsed);
+            return Err(LalrParseError::User {
+                error: FilterActionError::DepthExceeded(depth),
+            });
+        }
+        Ok(parsed)
     }
 }
 
@@ -676,9 +718,105 @@ impl std::str::FromStr for PatchPath {
     type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        crate::filter_parser::PathParser::new()
+        let parsed = crate::filter_parser::PathParser::new()
             .parse(s.trim())
-            .map_err(|e| e.map_token(|t| t.to_string()))
+            .map_err(|e| e.map_token(|t| t.to_string()))?;
+        match parsed {
+            PatchPath::Attr(a) => Ok(PatchPath::Attr(a)),
+            PatchPath::Value(vp) => {
+                match val_filter_depth_exceeds(&vp.filter, MAX_FILTER_DEPTH) {
+                    Some(depth) => {
+                        drop_val_filter_iteratively(vp.filter);
+                        Err(LalrParseError::User {
+                            error: FilterActionError::DepthExceeded(depth),
+                        })
+                    }
+                    None => Ok(PatchPath::Value(vp)),
+                }
+            }
+        }
+    }
+}
+
+// --- Depth enforcement helpers ----------------------------------------------
+//
+// Both the depth check and the over-deep drop path walk `Filter` / `ValFilter`
+// iteratively via an explicit worklist so that a pathological input cannot
+// overflow the call stack before we manage to reject it.
+
+/// Return `Some(depth)` as soon as any node's depth in `root` exceeds `limit`,
+/// else `None`.
+fn filter_depth_exceeds(root: &Filter, limit: usize) -> Option<usize> {
+    let mut worklist: Vec<(&Filter, usize)> = vec![(root, 1)];
+    while let Some((node, depth)) = worklist.pop() {
+        if depth > limit {
+            return Some(depth);
+        }
+        match node {
+            Filter::Attr(_) => {}
+            Filter::ValuePath(vp) => {
+                if let Some(d) = val_filter_depth_exceeds(&vp.filter, limit) {
+                    return Some(d);
+                }
+            }
+            Filter::Not(inner) => worklist.push((inner, depth + 1)),
+            Filter::And(lhs, rhs) | Filter::Or(lhs, rhs) => {
+                worklist.push((lhs, depth + 1));
+                worklist.push((rhs, depth + 1));
+            }
+        }
+    }
+    None
+}
+
+/// `ValFilter` mirror of [`filter_depth_exceeds`].
+fn val_filter_depth_exceeds(root: &ValFilter, limit: usize) -> Option<usize> {
+    let mut worklist: Vec<(&ValFilter, usize)> = vec![(root, 1)];
+    while let Some((node, depth)) = worklist.pop() {
+        if depth > limit {
+            return Some(depth);
+        }
+        match node {
+            ValFilter::Attr(_) => {}
+            ValFilter::Not(inner) => worklist.push((inner, depth + 1)),
+            ValFilter::And(lhs, rhs) | ValFilter::Or(lhs, rhs) => {
+                worklist.push((lhs, depth + 1));
+                worklist.push((rhs, depth + 1));
+            }
+        }
+    }
+    None
+}
+
+/// Drop a [`Filter`] without recursing, so an over-deep AST can be rejected
+/// without the derived recursive `Drop` overflowing the stack.
+fn drop_filter_iteratively(root: Filter) {
+    let mut stack: Vec<Filter> = vec![root];
+    while let Some(node) = stack.pop() {
+        match node {
+            Filter::Attr(_) => {}
+            Filter::ValuePath(vp) => drop_val_filter_iteratively(*vp.filter),
+            Filter::Not(inner) => stack.push(*inner),
+            Filter::And(lhs, rhs) | Filter::Or(lhs, rhs) => {
+                stack.push(*lhs);
+                stack.push(*rhs);
+            }
+        }
+    }
+}
+
+/// `ValFilter` mirror of [`drop_filter_iteratively`].
+fn drop_val_filter_iteratively(root: ValFilter) {
+    let mut stack: Vec<ValFilter> = vec![root];
+    while let Some(node) = stack.pop() {
+        match node {
+            ValFilter::Attr(_) => {}
+            ValFilter::Not(inner) => stack.push(*inner),
+            ValFilter::And(lhs, rhs) | ValFilter::Or(lhs, rhs) => {
+                stack.push(*lhs);
+                stack.push(*rhs);
+            }
+        }
     }
 }
 
@@ -1087,5 +1225,141 @@ mod tests {
         assert_eq!(f, reparsed);
         // The output must contain parens around the Or
         assert!(s.contains('('), "expected parens in {s:?}");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Depth-limit enforcement (DoS hardening against deeply nested filters)
+    // ---------------------------------------------------------------------------
+
+    fn assert_depth_exceeded<T: std::fmt::Debug>(res: Result<T, ParseError>) {
+        match res {
+            Err(LalrParseError::User {
+                error: FilterActionError::DepthExceeded(_),
+            }) => {}
+            Err(other) => panic!("expected ParseError::User(DepthExceeded), got {other:?}"),
+            Ok(ok) => panic!("expected rejection, but parse succeeded: {ok:?}"),
+        }
+    }
+
+    // Build a filter string whose parsed AST has depth exactly `depth` using
+    // nested `not`s: `not (not (... (title pr) ...))` with `depth - 1` `not`s
+    // gives a Not-chain with a leaf Attr underneath → AST depth = depth.
+    fn not_chain(depth: usize) -> String {
+        assert!(depth >= 1);
+        let nots = depth - 1;
+        format!("{}title pr{}", "not (".repeat(nots), ")".repeat(nots))
+    }
+
+    // Same, for `ValFilter` content inside `emails[...]`.
+    fn val_not_chain(depth: usize) -> String {
+        assert!(depth >= 1);
+        let nots = depth - 1;
+        format!(
+            r#"{}type eq "work"{}"#,
+            "not (".repeat(nots),
+            ")".repeat(nots)
+        )
+    }
+
+    #[test]
+    fn not_chain_within_limit_parses() {
+        let s = not_chain(MAX_FILTER_DEPTH);
+        s.parse::<Filter>()
+            .unwrap_or_else(|e| panic!("expected success at depth {MAX_FILTER_DEPTH}: {e:?}"));
+    }
+
+    #[test]
+    fn not_chain_exceeding_limit_rejected() {
+        let s = not_chain(MAX_FILTER_DEPTH + 5);
+        assert_depth_exceeded(s.parse::<Filter>());
+    }
+
+    #[test]
+    fn and_chain_within_limit_parses() {
+        // `a and b and c` is left-associative, so N leaves produce a depth-N AST
+        // (N-1 And nodes on the left spine + 1 leaf).
+        let n = MAX_FILTER_DEPTH;
+        let mut s = String::from("title pr");
+        for _ in 0..n - 1 {
+            s.push_str(" and title pr");
+        }
+        s.parse::<Filter>()
+            .unwrap_or_else(|e| panic!("expected success with {n} leaves: {e:?}"));
+    }
+
+    #[test]
+    fn and_chain_exceeding_limit_rejected() {
+        let n = MAX_FILTER_DEPTH + 10;
+        let mut s = String::from("title pr");
+        for _ in 0..n - 1 {
+            s.push_str(" and title pr");
+        }
+        assert_depth_exceeded(s.parse::<Filter>());
+    }
+
+    #[test]
+    fn or_chain_exceeding_limit_rejected() {
+        let n = MAX_FILTER_DEPTH + 10;
+        let mut s = String::from("title pr");
+        for _ in 0..n - 1 {
+            s.push_str(" or title pr");
+        }
+        assert_depth_exceeded(s.parse::<Filter>());
+    }
+
+    #[test]
+    fn value_path_inner_depth_bounded() {
+        // Over-deep ValFilter inside a ValuePath triggers val_filter_depth_exceeds.
+        let s = format!("emails[{}]", val_not_chain(MAX_FILTER_DEPTH + 5));
+        assert_depth_exceeded(s.parse::<Filter>());
+    }
+
+    #[test]
+    fn patch_path_value_path_depth_bounded() {
+        // Same, routed through PatchPath::from_str.
+        let s = format!("emails[{}]", val_not_chain(MAX_FILTER_DEPTH + 5));
+        assert_depth_exceeded(s.parse::<PatchPath>());
+    }
+
+    #[test]
+    fn patch_path_plain_attr_not_affected() {
+        // PatchPath::Attr has no recursive structure — depth check is a no-op.
+        let p: PatchPath = "name.familyName".parse().unwrap();
+        assert!(matches!(p, PatchPath::Attr(_)));
+    }
+
+    #[test]
+    fn deserialize_rejects_deep_nesting() {
+        // The Deserialize path delegates to FromStr; ensure a JSON-wrapped
+        // over-deep filter is rejected.
+        let raw = not_chain(MAX_FILTER_DEPTH + 5);
+        let json = serde_json::to_string(&raw).unwrap();
+        let err = serde_json::from_str::<Filter>(&json).unwrap_err();
+        assert!(
+            err.to_string().contains("depth"),
+            "expected depth error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn display_round_trip_at_limit_does_not_overflow() {
+        // Confirm the whole recursive path (Display, PartialEq, Debug,
+        // Serialize) is safe at the limit.
+        let s = not_chain(MAX_FILTER_DEPTH);
+        let f: Filter = s.parse().unwrap();
+        let displayed = f.to_string();
+        let reparsed: Filter = displayed.parse().unwrap();
+        assert_eq!(f, reparsed);
+        let _ = format!("{f:?}");
+        let _ = serde_json::to_string(&f).unwrap();
+    }
+
+    #[test]
+    fn extremely_deep_input_rejected_without_panic() {
+        // Regression for the H-1 finding: 10_000 nested `not`s must return an
+        // error rather than overflowing the stack during parse, depth-check,
+        // or drop of the rejected AST.
+        let s = not_chain(10_000);
+        assert_depth_exceeded(s.parse::<Filter>());
     }
 }

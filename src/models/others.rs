@@ -665,10 +665,7 @@ mod tests {
             serde_json::from_str(json).expect("tolerant deserialization must succeed");
         assert_eq!(req.start_index, 3);
         assert_eq!(req.count, 25);
-        assert!(matches!(
-            req.filter,
-            Some(MaybeFilter::Invalid { .. })
-        ));
+        assert!(matches!(req.filter, Some(MaybeFilter::Invalid { .. })));
     }
 
     #[test]
