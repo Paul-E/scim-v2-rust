@@ -127,6 +127,23 @@ pub enum FilterActionError {
 /// input is not a valid filter or path expression.
 pub type ParseError = LalrParseError<usize, String, FilterActionError>;
 
+/// Payload of [`MaybeFilter::Invalid`] and error type of the
+/// `TryFrom<Tolerant*>` / `into_strict` conversions on
+/// [`TolerantListQuery`](crate::models::others::TolerantListQuery) and
+/// [`TolerantSearchRequest`](crate::models::others::TolerantSearchRequest).
+///
+/// Captures the original filter string and underlying [`ParseError`] so
+/// callers can build an RFC 7644 §3.12 `invalidFilter` response body
+/// (typically via `.map_err(...)` into the caller's SCIM error type).
+#[derive(Debug, Error)]
+#[error("invalid SCIM filter {raw:?}: {error}")]
+pub struct InvalidFilterError {
+    /// The original filter string as received from the wire.
+    pub raw: String,
+    /// The underlying parse failure.
+    pub error: ParseError,
+}
+
 /// A SCIM filter expression (RFC 7644 §3.4.2.2).
 ///
 /// Filters are used in SCIM `GET` requests (`?filter=...`) and in conditional
@@ -253,10 +270,10 @@ impl<'de> Deserialize<'de> for Filter {
 pub enum MaybeFilter {
     /// The filter string parsed successfully.
     Valid(Filter),
-    /// The filter string did not parse. `raw` is the original input; `error`
-    /// is the underlying [`ParseError`] for constructing an RFC 7644 §3.12
-    /// `invalidFilter` error response.
-    Invalid { raw: String, error: ParseError },
+    /// The filter string did not parse. The wrapped [`InvalidFilterError`]
+    /// carries the original input and underlying [`ParseError`] for
+    /// constructing an RFC 7644 §3.12 `invalidFilter` error response.
+    Invalid(InvalidFilterError),
 }
 
 impl<'de> Deserialize<'de> for MaybeFilter {
@@ -267,7 +284,10 @@ impl<'de> Deserialize<'de> for MaybeFilter {
         let s = String::deserialize(deserializer)?;
         match s.parse::<Filter>() {
             Ok(f) => Ok(MaybeFilter::Valid(f)),
-            Err(e) => Ok(MaybeFilter::Invalid { raw: s, error: e }),
+            Err(e) => Ok(MaybeFilter::Invalid(InvalidFilterError {
+                raw: s,
+                error: e,
+            })),
         }
     }
 }

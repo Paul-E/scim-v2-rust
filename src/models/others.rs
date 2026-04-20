@@ -2,7 +2,7 @@ use serde::de::{DeserializeOwned, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::filter::{Filter, MaybeFilter, PatchPath};
+use crate::filter::{Filter, InvalidFilterError, MaybeFilter, PatchPath};
 use crate::models::group::Group;
 use crate::models::resource_types::ResourceType;
 use crate::models::scim_schema::Schema;
@@ -17,6 +17,81 @@ pub type TolerantListQuery = ListQuery<MaybeFilter>;
 /// Server-side variant of [`SearchRequest`] with the same tolerant filter
 /// behavior as [`TolerantListQuery`].
 pub type TolerantSearchRequest = SearchRequest<MaybeFilter>;
+
+/// [`ListQuery`] with a fully-parsed [`Filter`]. Equivalent to `ListQuery` with
+/// its default type parameter; provided as a named alias for symmetry with
+/// [`TolerantListQuery`] and as the `Ok` type of
+/// [`ListQuery::<MaybeFilter>::into_strict`].
+pub type StrictListQuery = ListQuery<Filter>;
+
+/// [`SearchRequest`] with a fully-parsed [`Filter`]. Equivalent to
+/// `SearchRequest` with its default type parameter; provided as a named alias
+/// for symmetry with [`TolerantSearchRequest`] and as the `Ok` type of
+/// [`SearchRequest::<MaybeFilter>::into_strict`].
+pub type StrictSearchRequest = SearchRequest<Filter>;
+
+impl TryFrom<TolerantListQuery> for StrictListQuery {
+    type Error = InvalidFilterError;
+
+    fn try_from(q: TolerantListQuery) -> Result<Self, Self::Error> {
+        let filter = match q.filter {
+            None => None,
+            Some(MaybeFilter::Valid(f)) => Some(f),
+            Some(MaybeFilter::Invalid(err)) => return Err(err),
+        };
+        Ok(ListQuery {
+            filter,
+            start_index: q.start_index,
+            count: q.count,
+            attributes: q.attributes,
+            excluded_attributes: q.excluded_attributes,
+        })
+    }
+}
+
+impl TryFrom<TolerantSearchRequest> for StrictSearchRequest {
+    type Error = InvalidFilterError;
+
+    fn try_from(r: TolerantSearchRequest) -> Result<Self, Self::Error> {
+        let filter = match r.filter {
+            None => None,
+            Some(MaybeFilter::Valid(f)) => Some(f),
+            Some(MaybeFilter::Invalid(err)) => return Err(err),
+        };
+        Ok(SearchRequest {
+            schemas: r.schemas,
+            attributes: r.attributes,
+            excluded_attributes: r.excluded_attributes,
+            filter,
+            start_index: r.start_index,
+            count: r.count,
+        })
+    }
+}
+
+impl ListQuery<MaybeFilter> {
+    /// Convert a [`TolerantListQuery`] into a [`StrictListQuery`], failing if
+    /// the embedded filter is [`MaybeFilter::Invalid`].
+    ///
+    /// Callers typically pair this with `.map_err(...)` to turn the
+    /// [`InvalidFilterError`] into their own RFC 7644 §3.12 `invalidFilter`
+    /// error response.
+    pub fn into_strict(self) -> Result<StrictListQuery, InvalidFilterError> {
+        StrictListQuery::try_from(self)
+    }
+}
+
+impl SearchRequest<MaybeFilter> {
+    /// Convert a [`TolerantSearchRequest`] into a [`StrictSearchRequest`],
+    /// failing if the embedded filter is [`MaybeFilter::Invalid`].
+    ///
+    /// Callers typically pair this with `.map_err(...)` to turn the
+    /// [`InvalidFilterError`] into their own RFC 7644 §3.12 `invalidFilter`
+    /// error response.
+    pub fn into_strict(self) -> Result<StrictSearchRequest, InvalidFilterError> {
+        StrictSearchRequest::try_from(self)
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -746,8 +821,8 @@ mod tests {
         assert_eq!(q.count, Some(50));
         assert_eq!(q.start_index, Some(2));
         match q.filter {
-            Some(MaybeFilter::Invalid { raw, error: _ }) => {
-                assert_eq!(raw, r#"userName eq "alice"#);
+            Some(MaybeFilter::Invalid(err)) => {
+                assert_eq!(err.raw, r#"userName eq "alice"#);
             }
             other => panic!("expected Invalid filter, got {other:?}"),
         }
@@ -781,7 +856,51 @@ mod tests {
             serde_json::from_str(json).expect("tolerant deserialization must succeed");
         assert_eq!(req.start_index, 3);
         assert_eq!(req.count, 25);
-        assert!(matches!(req.filter, Some(MaybeFilter::Invalid { .. })));
+        assert!(matches!(req.filter, Some(MaybeFilter::Invalid(_))));
+    }
+
+    #[test]
+    fn test_into_strict_list_query_valid_filter() {
+        let json = r#"{ "filter": "userName eq \"alice\"", "count": 5 }"#;
+        let tolerant: TolerantListQuery = serde_json::from_str(json).unwrap();
+        let strict: StrictListQuery = tolerant
+            .into_strict()
+            .expect("valid filter must convert cleanly");
+        assert_eq!(strict.count, Some(5));
+        assert!(matches!(strict.filter, Some(Filter::Attr(_))));
+    }
+
+    #[test]
+    fn test_into_strict_list_query_invalid_filter_returns_error() {
+        let json = r#"{ "filter": "userName eq \"alice", "count": 5 }"#;
+        let tolerant: TolerantListQuery = serde_json::from_str(json).unwrap();
+        let err = tolerant
+            .into_strict()
+            .expect_err("malformed filter must produce InvalidFilterError");
+        assert_eq!(err.raw, r#"userName eq "alice"#);
+    }
+
+    #[test]
+    fn test_into_strict_search_request_invalid_filter_returns_error() {
+        let json = r#"{
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:SearchRequest"],
+            "filter": "emails[type eq",
+            "startIndex": 2,
+            "count": 15
+        }"#;
+        let tolerant: TolerantSearchRequest = serde_json::from_str(json).unwrap();
+        let err = tolerant
+            .into_strict()
+            .expect_err("malformed filter must produce InvalidFilterError");
+        assert_eq!(err.raw, "emails[type eq");
+    }
+
+    #[test]
+    fn test_into_strict_passes_through_none_filter() {
+        let tolerant: TolerantListQuery = serde_json::from_str(r#"{ "count": 7 }"#).unwrap();
+        let strict = tolerant.into_strict().expect("no filter must succeed");
+        assert!(strict.filter.is_none());
+        assert_eq!(strict.count, Some(7));
     }
 
     #[test]
