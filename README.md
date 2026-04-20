@@ -30,18 +30,18 @@ Here are some examples of how you can use this crate:
 
 ### Validating a User
 
-```
+```rust
 use scim_v2::models::user::User;
 
 let user = User {
-user_name: "jdoe@example.com".to_string(),
-// other fields...
-..Default::default()
+    user_name: "jdoe@example.com".to_string(),
+    // other fields...
+    ..Default::default()
 };
 
 match user.validate() {
-Ok(_) => println!("User is valid."),
-Err(e) => println!("User is invalid: {}", e),
+    Ok(_) => println!("User is valid."),
+    Err(e) => println!("User is invalid: {}", e),
 }
 ```
 
